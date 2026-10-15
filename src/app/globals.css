@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+:root {
+  --background: #111216;
+  --surface: #1a1b21;
+  --surface-container: #22242c;
+  --outline: #2e3039;
+  --primary-fab: #344F87;
+  --primary-fab-hover: #3d5b99;
+  --primary-fab-active: #2b4273;
+  --text-main: #f0f0f3;
+  --text-muted: #9aa0a6;
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--text-main);
+  font-family: var(--font-roboto), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Minimal Flat Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #111216;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #23252d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #343743;
+}
+
+/* Material Design Outlined Input Transition */
+input:focus {
+  outline: none;
+}
