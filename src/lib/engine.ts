@@ -204,7 +204,7 @@ function parseYtDlpError(stderrData: string): string {
  */
 export async function extractMetadata(
   videoUrl: string,
-  originUrl?: string
+  incomingHeaders?: Headers | Record<string, string | null | undefined> | string
 ): Promise<VideoMetadata> {
   const pythonCmd = findPythonBinary();
 
@@ -278,34 +278,98 @@ export async function extractMetadata(
     });
   }
 
-  // Mode 2: Vercel Serverless environment - delegate to /api/extract Python Function
-  const host = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : originUrl || 'http://localhost:3000';
+  // Mode 2: Vercel Serverless environment - delegate to Python Function (/api/extract.py or /api/extract)
+  let baseUrl = '';
 
-  const endpoint = `${host}/api/extract`;
-  console.log(`[MediaVault Engine] Node Python not found. Delegating extraction to Vercel Python runtime: ${endpoint}`);
-
-  try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: videoUrl }),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || `Python extraction function returned status ${res.status}`);
+  const getHeader = (name: string): string | null => {
+    if (!incomingHeaders || typeof incomingHeaders === 'string') return null;
+    if (typeof (incomingHeaders as Headers).get === 'function') {
+      return (incomingHeaders as Headers).get(name);
     }
+    const record = incomingHeaders as Record<string, string | null | undefined>;
+    return record[name] || record[name.toLowerCase()] || null;
+  };
 
-    return data.data as VideoMetadata;
-  } catch (fetchErr: unknown) {
-    const errMsg = fetchErr instanceof Error ? fetchErr.message : 'Unknown network error';
-    console.error('[MediaVault Engine] Python function delegation failed:', errMsg);
-    throw new Error(
-      `Video extraction engine is unavailable. Neither local Python nor Vercel Python function was reachable (${errMsg}).`
-    );
+  const xForwardedHost = getHeader('x-forwarded-host');
+  const xForwardedProto = getHeader('x-forwarded-proto') || 'https';
+  const reqHost = getHeader('host');
+
+  if (xForwardedHost) {
+    baseUrl = `${xForwardedProto}://${xForwardedHost}`;
+  } else if (reqHost) {
+    baseUrl = `${xForwardedProto}://${reqHost}`;
+  } else if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    baseUrl = `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  } else if (process.env.VERCEL_URL) {
+    baseUrl = `https://${process.env.VERCEL_URL}`;
+  } else if (typeof incomingHeaders === 'string' && incomingHeaders.startsWith('http')) {
+    baseUrl = incomingHeaders;
+  } else {
+    baseUrl = 'http://localhost:3000';
   }
+
+  baseUrl = baseUrl.replace(/\/+$/, '');
+
+  const fetchHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  const bypassHeader = getHeader('x-vercel-protection-bypass') || process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  if (bypassHeader) {
+    fetchHeaders['x-vercel-protection-bypass'] = bypassHeader;
+  }
+  const cookieHeader = getHeader('cookie');
+  if (cookieHeader) {
+    fetchHeaders['cookie'] = cookieHeader;
+  }
+  const authHeader = getHeader('authorization');
+  if (authHeader) {
+    fetchHeaders['authorization'] = authHeader;
+  }
+
+  // Candidates: try direct Python function path first, then rewritten route
+  const candidateEndpoints = [
+    `${baseUrl}/api/extract.py`,
+    `${baseUrl}/api/extract`,
+  ];
+
+  let lastError: Error | null = null;
+
+  for (const endpoint of candidateEndpoints) {
+    console.log(`[MediaVault Engine] Delegating extraction to Vercel Python runtime: ${endpoint}`);
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: fetchHeaders,
+        body: JSON.stringify({ url: videoUrl }),
+        signal: AbortSignal.timeout(55000),
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await res.text();
+        const snippet = text.slice(0, 160).replace(/\s+/g, ' ');
+        throw new Error(`Endpoint returned non-JSON response (status ${res.status}): ${snippet}`);
+      }
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Python extraction function returned status ${res.status}`);
+      }
+
+      return data.data as VideoMetadata;
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      console.warn(`[MediaVault Engine] Request to ${endpoint} failed: ${lastError.message}`);
+    }
+  }
+
+  const errMsg = lastError ? lastError.message : 'No endpoint succeeded';
+  console.error('[MediaVault Engine] All Python function endpoints failed:', errMsg);
+  throw new Error(
+    `Video extraction engine is unavailable. Neither local Python nor Vercel Python function was reachable (${errMsg}).`
+  );
 }
 
 function processRawMetadata(raw: RawYtDlpOutput, originalUrl: string): VideoMetadata {

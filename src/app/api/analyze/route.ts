@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateAndNormalizeUrl } from '@/lib/security';
 import { extractMetadata } from '@/lib/engine';
 
+export const maxDuration = 60;
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -15,8 +17,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const originUrl = req.nextUrl.origin;
-    const metadata = await extractMetadata(validation.url, originUrl);
+    const metadata = await extractMetadata(validation.url, req.headers);
 
     return NextResponse.json({
       success: true,

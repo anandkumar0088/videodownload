@@ -6,7 +6,6 @@ from http.server import BaseHTTPRequestHandler
 import json
 import sys
 import re
-import urllib.parse
 
 try:
     import yt_dlp
@@ -140,47 +139,97 @@ def extract_video_info(video_url):
                 reverse=True
             )[0]
 
+            has_audio = best_match.get('acodec') != 'none'
+            requires_merge = not has_audio
+
+            # Format selector for yt-dlp
+            raw_format_id = str(best_match.get('format_id') or target['label'])
+            if requires_merge:
+                if target['label'] == '4K':
+                    format_id = f"{raw_format_id}+140/{raw_format_id}+ba/bestvideo[height>=2160]+bestaudio/best"
+                elif target['label'] == '2K':
+                    format_id = f"{raw_format_id}+140/{raw_format_id}+ba/bestvideo[height>=1440]+bestaudio/best"
+                elif target['label'] == '1080p':
+                    format_id = f"{raw_format_id}+140/{raw_format_id}+ba/bestvideo[height>=1080]+bestaudio/best"
+                else:
+                    format_id = f"{raw_format_id}+ba/best"
+            else:
+                format_id = raw_format_id
+
             video_size = best_match.get('filesize') or best_match.get('filesize_approx') or 0
-            audio_size = (
-                best_audio_stream.get('filesize') or best_audio_stream.get('filesize_approx') or 0
-            ) if (best_audio_stream and best_match.get('acodec') == 'none') else 0
+            if not video_size and duration > 0 and best_match.get('tbr'):
+                video_size = int((best_match['tbr'] * 1024 * duration) / 8)
+
+            audio_size = 0
+            if requires_merge and best_audio_stream:
+                audio_size = best_audio_stream.get('filesize') or best_audio_stream.get('filesize_approx') or 0
+                if not audio_size and duration > 0 and best_audio_stream.get('abr'):
+                    audio_size = int((best_audio_stream['abr'] * 1024 * duration) / 8)
+
             total_size = video_size + audio_size
 
             parsed_options.append({
-                'formatId': best_match.get('format_id') or target['label'],
+                'formatId': format_id,
                 'qualityLabel': target['label'],
-                'resolution': best_match.get('resolution') or f"{best_match.get('width', 0)}x{best_match.get('height', 0)}",
+                'resolution': target['name'],
                 'ext': 'mp4',
+                'fps': best_match.get('fps'),
+                'filesizeApprox': total_size if total_size > 0 else None,
+                'filesizeFormatted': format_bytes(total_size) if total_size > 0 else 'Estimated at download',
                 'filesize': total_size if total_size > 0 else None,
-                'filesizeFormatted': format_bytes(total_size) if total_size > 0 else None,
                 'hasAudio': True,
+                'requiresMerge': requires_merge,
                 'vcodec': best_match.get('vcodec'),
-                'acodec': best_match.get('acodec') or (best_audio_stream.get('acodec') if best_audio_stream else None),
+                'acodec': best_match.get('acodec') or (best_audio_stream.get('acodec') if best_audio_stream else 'aac'),
+                'width': best_match.get('width'),
+                'height': best_match.get('height'),
             })
 
     # Audio option
     if best_audio_stream:
         a_size = best_audio_stream.get('filesize') or best_audio_stream.get('filesize_approx') or 0
+        if not a_size and duration > 0 and best_audio_stream.get('abr'):
+            a_size = int((best_audio_stream['abr'] * 1024 * duration) / 8)
+
         parsed_options.append({
-            'formatId': best_audio_stream.get('format_id') or 'ba/b',
+            'formatId': 'ba/b',
             'qualityLabel': 'Audio Only',
-            'resolution': 'Audio Stream (MP3)',
+            'resolution': f"{int(best_audio_stream.get('abr'))} kbps Audio" if best_audio_stream.get('abr') else 'High Quality Audio',
             'ext': 'mp3',
+            'filesizeApprox': a_size if a_size > 0 else None,
+            'filesizeFormatted': format_bytes(a_size) if a_size > 0 else 'Estimated at download',
             'filesize': a_size if a_size > 0 else None,
-            'filesizeFormatted': format_bytes(a_size) if a_size > 0 else None,
             'hasAudio': True,
-            'acodec': best_audio_stream.get('acodec'),
+            'requiresMerge': False,
+            'acodec': best_audio_stream.get('acodec') or 'mp3',
+        })
+
+    # Fallback if no specific resolution buckets matched
+    if not parsed_options and raw_formats:
+        parsed_options.append({
+            'formatId': 'b',
+            'qualityLabel': '720p',
+            'resolution': 'Standard Best',
+            'ext': 'mp4',
+            'hasAudio': True,
+            'requiresMerge': True,
+            'filesizeFormatted': 'Calculated at download',
         })
 
     return {
         'id': raw.get('id', ''),
         'title': raw.get('title', 'Untitled Video'),
+        'description': raw.get('description'),
         'thumbnail': raw.get('thumbnail'),
         'duration': duration,
         'durationFormatted': format_duration(duration),
-        'uploader': raw.get('uploader'),
+        'uploader': raw.get('uploader') or 'Unknown Author',
+        'uploaderUrl': raw.get('uploader_url'),
+        'viewCount': raw.get('view_count'),
         'originalUrl': video_url,
         'isVertical': is_vertical,
+        'aspectRatio': aspect_ratio,
+        'license': raw.get('license'),
         'formats': parsed_options,
     }
 
@@ -197,7 +246,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, x-vercel-protection-bypass, authorization')
         self.end_headers()
         self.wfile.write(body)
 
@@ -205,7 +254,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, x-vercel-protection-bypass, authorization')
         self.end_headers()
 
     def do_GET(self):
