@@ -223,10 +223,8 @@ export async function extractMetadata(
         '--dump-json',
         '--no-playlist',
         '--no-warnings',
-        '--js-runtimes',
-        'node',
-        '--remote-components',
-        'ejs:github'
+        '--extractor-args',
+        'youtube:player_client=android,ios,web_embedded,mweb'
       );
       if (ffmpeg) {
         args.push('--ffmpeg-location', ffmpeg);
@@ -354,13 +352,33 @@ export async function extractMetadata(
       }
 
       const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || `Python extraction function returned status ${res.status}`);
+      if (data && data.success === false) {
+        // The Python engine was reached and responded with a platform/extraction error
+        throw new Error(data.error || 'Video extraction failed on the target platform.');
+      }
+
+      if (!res.ok) {
+        throw new Error(`Python extraction function returned status ${res.status}`);
       }
 
       return data.data as VideoMetadata;
     } catch (err: unknown) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      const msg = lastError.message;
+      // If the Python function was reached and returned an extraction/platform error,
+      // rethrow immediately so the user sees the real message without an engine-unreachable wrapper
+      if (
+        msg.includes('restricted automated access') ||
+        msg.includes('Platform requires login') ||
+        msg.includes('DRM') ||
+        msg.includes('private') ||
+        msg.includes('unavailable') ||
+        msg.includes('bot verification') ||
+        msg.includes('Sign in') ||
+        msg.includes('YT_COOKIES')
+      ) {
+        throw lastError;
+      }
       console.warn(`[MediaVault Engine] Request to ${endpoint} failed: ${lastError.message}`);
     }
   }

@@ -4,13 +4,47 @@ Compatible with Vercel Python Serverless Functions and local execution.
 """
 from http.server import BaseHTTPRequestHandler
 import json
+import os
 import sys
 import re
+import tempfile
 
 try:
     import yt_dlp
 except ImportError:
     yt_dlp = None
+
+
+def get_cookie_file():
+    """
+    Checks for cookies.txt in environment variables or filesystem.
+    """
+    # 1. Environment variable containing cookies text
+    cookie_env = (
+        os.environ.get('YT_COOKIES') or
+        os.environ.get('YOUTUBE_COOKIES') or
+        os.environ.get('COOKIES_TXT')
+    )
+    if cookie_env and cookie_env.strip():
+        try:
+            tf = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8')
+            tf.write(cookie_env.strip())
+            tf.close()
+            return tf.name
+        except Exception:
+            pass
+
+    # 2. Local cookies.txt file
+    candidates = [
+        os.path.join(os.getcwd(), 'cookies.txt'),
+        os.path.join(os.getcwd(), 'api', 'cookies.txt'),
+        os.path.join(os.path.dirname(__file__), 'cookies.txt'),
+    ]
+    for path in candidates:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return path
+
+    return None
 
 
 def format_duration(seconds):
@@ -40,33 +74,74 @@ def extract_video_info(video_url):
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed in the Python environment.")
 
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-        'extract_flat': False,
-        'no_color': True,
-    }
+    cookie_file = get_cookie_file()
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            raw = ydl.extract_info(video_url, download=False)
-    except Exception as err:
-        err_str = str(err)
-        if 'DRM' in err_str:
-            raise RuntimeError("This content is protected by DRM and cannot be downloaded.")
-        elif 'Private video' in err_str:
-            raise RuntimeError("This video is private and cannot be downloaded.")
-        elif 'Video unavailable' in err_str or '404' in err_str:
-            raise RuntimeError("The requested video was not found or is unavailable.")
-        elif 'Sign in' in err_str or 'bot' in err_str:
-            raise RuntimeError("Platform requires login or has restricted automated access.")
-        else:
-            clean_err = re.sub(r'^ERROR:\s*', '', err_str.strip())
-            raise RuntimeError(clean_err if clean_err else "Failed to extract video information.")
+    # Client strategies prioritized for cloud/datacenter IP reliability:
+    # 1. android_creator: mobile creator protocol, delivers all 4K/2K/1080p formats without web bot gates
+    # 2. ios_creator: iOS creator fallback with high quality streams
+    # 3. None: standard yt-dlp default extractor
+    # 4. android: base mobile client
+    client_strategies = [
+        ['android_creator'],
+        ['ios_creator'],
+        None,
+        ['android'],
+    ]
+
+    raw = None
+    last_err_str = ''
+
+    for clients in client_strategies:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'extract_flat': False,
+            'no_color': True,
+        }
+
+        if clients:
+            ydl_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': clients,
+                }
+            }
+
+        if cookie_file and os.path.exists(cookie_file):
+            ydl_opts['cookiefile'] = cookie_file
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                raw = ydl.extract_info(video_url, download=False)
+            if raw and raw.get('formats'):
+                break
+        except Exception as err:
+            last_err_str = str(err)
+            # If it's a permanent failure (DRM, private, 404), no need to retry other clients
+            if any(k in last_err_str for k in ['DRM', 'Private video', 'Video unavailable', '404']):
+                break
+            continue
+
+    if cookie_file and cookie_file.startswith(tempfile.gettempdir()):
+        try:
+            os.unlink(cookie_file)
+        except Exception:
+            pass
 
     if not raw:
-        raise RuntimeError("Failed to retrieve media information from source.")
+        if 'DRM' in last_err_str:
+            raise RuntimeError("This content is protected by DRM and cannot be downloaded.")
+        elif 'Private video' in last_err_str:
+            raise RuntimeError("This video is private and cannot be downloaded.")
+        elif 'Video unavailable' in last_err_str or '404' in last_err_str:
+            raise RuntimeError("The requested video was not found or is unavailable.")
+        elif 'Sign in' in last_err_str or 'bot' in last_err_str:
+            raise RuntimeError(
+                "YouTube has restricted automated access on this cloud server IP. Please try again shortly or configure YT_COOKIES."
+            )
+        else:
+            clean_err = re.sub(r'^ERROR:\s*', '', last_err_str.strip())
+            raise RuntimeError(clean_err if clean_err else "Failed to retrieve media information from source.")
 
     duration = raw.get('duration') or 0
     width = raw.get('width') or 0
