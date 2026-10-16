@@ -7,6 +7,32 @@ export async function GET(
   { params }: { params: Promise<{ jobId: string }> }
 ) {
   const { jobId } = await params;
+
+  // 1. Proxy SSE from external dedicated backend if configured
+  const backendUrl = process.env.MEDIAVAULT_BACKEND_URL;
+  if (backendUrl) {
+    try {
+      const targetUrl = `${backendUrl.replace(/\/+$/, '')}/api/download/progress/${jobId}`;
+      const backendRes = await fetch(targetUrl, {
+        headers: { Accept: 'text/event-stream' },
+        signal: req.signal,
+      });
+
+      if (backendRes.ok && backendRes.body) {
+        return new Response(backendRes.body, {
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          },
+        });
+      }
+    } catch {
+      // Fallback to local job lookup
+    }
+  }
+
   const initialJob = jobManager.getJob(jobId);
 
   if (!initialJob) {

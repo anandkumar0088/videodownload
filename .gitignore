@@ -48,5 +48,9 @@ __pycache__/
 
 # Temporary downloads and local database
 temp_downloads/
+backend/temp_downloads/
 data/*.db
+cookies.txt
+*.cookies
+
 

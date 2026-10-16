@@ -16,23 +16,28 @@ export async function GET(
     return NextResponse.json({ error: 'Invalid Job ID' }, { status: 400 });
   }
 
-  // Find corresponding file
+  // 1. If dedicated external backend is configured and file is not local, redirect directly
+  const backendUrl = process.env.MEDIAVAULT_BACKEND_URL;
+
+  // 2. Find corresponding file locally if present
   const job = jobManager.getJob(jobId);
   let targetPath = job?.filePath;
 
-  if (!targetPath || !fs.existsSync(/*turbopackIgnore: true*/ targetPath)) {
-    // Scan temp_downloads directly
-    const candidates = fs.readdirSync(TEMP_DIR).filter((f) => f.startsWith(jobId));
-    const finalFile = candidates.find((f) => !f.endsWith('.part') && !f.endsWith('.ytdl'));
-    if (finalFile) {
-      targetPath = path.join(TEMP_DIR, finalFile);
+  if ((!targetPath || !fs.existsSync(/*turbopackIgnore: true*/ targetPath)) && fs.existsSync(/*turbopackIgnore: true*/ TEMP_DIR)) {
+    try {
+      const candidates = fs.readdirSync(TEMP_DIR).filter((f) => f.startsWith(jobId));
+      const finalFile = candidates.find((f) => !f.endsWith('.part') && !f.endsWith('.ytdl'));
+      if (finalFile) {
+        targetPath = path.join(TEMP_DIR, finalFile);
+      }
+    } catch {
+      // Ignore read error
     }
   }
 
   if (!targetPath || !fs.existsSync(/*turbopackIgnore: true*/ targetPath)) {
-    const backendUrl = process.env.MEDIAVAULT_BACKEND_URL;
     if (backendUrl) {
-      return NextResponse.redirect(`${backendUrl.replace(/\/+$/, '')}/api/download/file/${jobId}`);
+      return NextResponse.redirect(`${backendUrl.replace(/\/+$/, '')}/api/download/file/${jobId}`, 307);
     }
     return NextResponse.json({ error: 'Requested media file not found or expired.' }, { status: 404 });
   }

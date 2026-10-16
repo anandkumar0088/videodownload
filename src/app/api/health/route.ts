@@ -9,6 +9,25 @@ export async function GET(req: NextRequest) {
   const downloadAvailable = isDownloadEngineAvailable();
   const backendUrl = process.env.MEDIAVAULT_BACKEND_URL || null;
 
+  // Test dedicated backend worker availability if configured
+  let backendWorkerDetails: Record<string, unknown> | null = null;
+  let backendWorkerStatus = backendUrl ? 'untested' : 'not_configured';
+
+  if (backendUrl) {
+    try {
+      const targetUrl = `${backendUrl.replace(/\/+$/, '')}/health`;
+      const res = await fetch(targetUrl, { signal: AbortSignal.timeout(4000) });
+      if (res.ok) {
+        backendWorkerDetails = await res.json();
+        backendWorkerStatus = 'healthy';
+      } else {
+        backendWorkerStatus = `error_status_${res.status}`;
+      }
+    } catch (err: unknown) {
+      backendWorkerStatus = `unreachable: ${(err as Error).message}`;
+    }
+  }
+
   // Test Python extraction function availability
   let pythonFunctionStatus = 'untested';
   let pythonFunctionDetails = null;
@@ -64,6 +83,8 @@ export async function GET(req: NextRequest) {
         mode: backendUrl ? 'external_worker' : downloadAvailable ? 'local_process' : 'serverless_restricted',
         available: Boolean(backendUrl || downloadAvailable),
         backendUrlConfigured: Boolean(backendUrl),
+        status: backendWorkerStatus,
+        details: backendWorkerDetails,
         description: backendUrl
           ? 'Routing download jobs to dedicated external worker service.'
           : downloadAvailable

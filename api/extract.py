@@ -137,7 +137,10 @@ def extract_video_info(video_url):
             raise RuntimeError("The requested video was not found or is unavailable.")
         elif 'Sign in' in last_err_str or 'bot' in last_err_str:
             raise RuntimeError(
-                "YouTube has restricted automated access on this cloud server IP. Please try again shortly or configure YT_COOKIES."
+                "YouTube has restricted automated access on this cloud server IP. "
+                "This is an access-control restriction by YouTube against datacenter IP ranges. "
+                "Supported alternatives (such as Archive.org, Vimeo, SoundCloud, or direct media streams) "
+                "can be analyzed and downloaded directly, or you can configure YT_COOKIES on your backend."
             )
         else:
             clean_err = re.sub(r'^ERROR:\s*', '', last_err_str.strip())
@@ -227,7 +230,7 @@ def extract_video_info(video_url):
                 elif target['label'] == '1080p':
                     format_id = f"{raw_format_id}+140/{raw_format_id}+ba/bestvideo[height>=1080]+bestaudio/best"
                 else:
-                    format_id = f"{raw_format_id}+ba/best"
+                    format_id = f"{raw_format_id}+ba/{raw_format_id}/best"
             else:
                 format_id = raw_format_id
 

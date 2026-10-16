@@ -188,7 +188,7 @@ function parseYtDlpError(stderrData: string): string {
     return 'The requested video was not found or is unavailable.';
   }
   if (stderrData.includes('Sign in') || stderrData.includes('bot')) {
-    return 'Platform requires login or has restricted automated access.';
+    return 'YouTube has restricted automated access on this cloud server IP. Please configure YT_COOKIES on your backend server or try another video platform (e.g. Vimeo, SoundCloud, Archive.org).';
   }
   if (stderrData.trim()) {
     const lines = stderrData.trim().split(/\r?\n/);
@@ -200,12 +200,49 @@ function parseYtDlpError(stderrData: string): string {
 
 /**
  * Extracts and maps video metadata.
- * Uses local Python engine if available, or delegates to Vercel Python Function (/api/extract).
+ * Prioritizes dedicated backend worker if MEDIAVAULT_BACKEND_URL is configured,
+ * then local Python engine, and finally Vercel Python Function (/api/extract).
  */
 export async function extractMetadata(
   videoUrl: string,
   incomingHeaders?: Headers | Record<string, string | null | undefined> | string
 ): Promise<VideoMetadata> {
+  // Mode 0: Dedicated external worker service (FastAPI)
+  const backendUrl = process.env.MEDIAVAULT_BACKEND_URL;
+  if (backendUrl) {
+    try {
+      const targetUrl = `${backendUrl.replace(/\/+$/, '')}/api/analyze`;
+      console.log(`[MediaVault Engine] Delegating extraction to dedicated backend: ${targetUrl}`);
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: videoUrl }),
+        signal: AbortSignal.timeout(35000),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success && data.data) {
+        return data.data as VideoMetadata;
+      }
+      if (data && (data.detail || data.error)) {
+        const errorDetail = data.detail || data.error;
+        throw new Error(typeof errorDetail === 'string' ? errorDetail : JSON.stringify(errorDetail));
+      }
+    } catch (err: unknown) {
+      const msg = (err as Error).message || '';
+      if (
+        msg.includes('restricted automated access') ||
+        msg.includes('DRM') ||
+        msg.includes('private') ||
+        msg.includes('unavailable') ||
+        msg.includes('YT_COOKIES')
+      ) {
+        throw err;
+      }
+      console.warn(`[MediaVault Engine] External backend extraction failed: ${msg}. Attempting fallback.`);
+    }
+  }
+
   const pythonCmd = findPythonBinary();
 
   // Mode 1: Local execution via detected Python executable
@@ -479,13 +516,13 @@ function processRawMetadata(raw: RawYtDlpOutput, originalUrl: string): VideoMeta
       let formatId = best.format_id;
       if (requiresMerge) {
         if (target.label === '4K') {
-          formatId = `${best.format_id}+140/${best.format_id}+ba/bestvideo[height>=2160]+bestaudio/bestvideo[width>=3840]+bestaudio`;
+          formatId = `${best.format_id}+140/${best.format_id}+ba/bestvideo[height>=2160]+bestaudio/best`;
         } else if (target.label === '2K') {
-          formatId = `${best.format_id}+140/${best.format_id}+ba/bestvideo[height>=1440]+bestaudio`;
+          formatId = `${best.format_id}+140/${best.format_id}+ba/bestvideo[height>=1440]+bestaudio/best`;
         } else if (target.label === '1080p') {
-          formatId = `${best.format_id}+140/${best.format_id}+ba/bestvideo[height>=1080]+bestaudio`;
+          formatId = `${best.format_id}+140/${best.format_id}+ba/bestvideo[height>=1080]+bestaudio/best`;
         } else {
-          formatId = `${best.format_id}+ba`;
+          formatId = `${best.format_id}+ba/${best.format_id}/best`;
         }
       }
 

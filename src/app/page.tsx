@@ -24,6 +24,10 @@ import {
 
 const SAMPLES = [
   {
+    label: 'Archive.org (Open)',
+    url: 'https://archive.org/details/BigBuckBunny_124',
+  },
+  {
     label: 'Big Buck Bunny (4K)',
     url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ',
   },
@@ -47,6 +51,7 @@ export default function Home() {
 
   const [activeJob, setActiveJob] = useState<DownloadJob | null>(null);
   const [isStartingDownload, setIsStartingDownload] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [history, setHistory] = useState<DownloadHistoryItem[]>([]);
 
   // Modals
@@ -110,6 +115,7 @@ export default function Home() {
 
     setIsAnalyzing(true);
     setAnalyzeError(null);
+    setDownloadError(null);
     setMetadata(null);
 
     try {
@@ -139,6 +145,7 @@ export default function Home() {
     if (!metadata) return;
 
     setIsStartingDownload(true);
+    setDownloadError(null);
     cleanupProgressConnection();
 
     try {
@@ -183,7 +190,7 @@ export default function Home() {
       connectProgressStream(jobId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to launch download.';
-      alert(msg);
+      setDownloadError(msg);
     } finally {
       setIsStartingDownload(false);
     }
@@ -412,11 +419,79 @@ export default function Home() {
               </div>
             )}
 
-            {/* Error Message */}
+            {/* Analyze Error Message */}
             {analyzeError && (
-              <div className="w-full p-3.5 mb-4 rounded-xl bg-[#20181b] border border-[#402228] text-red-300 text-xs flex items-center gap-2.5">
-                <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
-                <span>{analyzeError}</span>
+              analyzeError.toLowerCase().includes('youtube has restricted') ||
+              analyzeError.toLowerCase().includes('automated access') ||
+              analyzeError.toLowerCase().includes('yt_cookies') ||
+              analyzeError.toLowerCase().includes('bot') ? (
+                <div className="w-full p-4 mb-5 rounded-2xl bg-[#20181b] border border-[#5a2830] text-[#f0f0f3] text-xs">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2 text-red-400 font-medium">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>YouTube Cloud IP Restriction</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAnalyzeError(null)}
+                      className="text-[#9aa0a6] hover:text-white cursor-pointer"
+                      title="Dismiss"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-[#d1d5db] text-xs leading-relaxed mb-3">
+                    YouTube has restricted automated requests on this cloud server IP. This is an access-control restriction enforced by YouTube on cloud datacenters, not a MediaVault backend failure.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-[#402228]">
+                    <span className="text-[#9ca3af] text-[11px]">Supported alternative:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const sampleUrl = 'https://archive.org/details/BigBuckBunny_124';
+                        setUrl(sampleUrl);
+                        handleAnalyze(sampleUrl);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-[#2e1d24] hover:bg-[#3d242f] text-emerald-300 border border-[#5c2b37] text-xs font-medium transition-colors cursor-pointer"
+                    >
+                      Test Open Media (Archive.org)
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="w-full p-3.5 mb-4 rounded-xl bg-[#20181b] border border-[#402228] text-red-300 text-xs flex items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                    <span>{analyzeError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAnalyzeError(null)}
+                    className="text-[#9aa0a6] hover:text-white text-xs cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )
+            )}
+
+            {/* Download Launch Error Message */}
+            {downloadError && (
+              <div className="w-full p-3.5 mb-4 rounded-xl bg-[#20181b] border border-[#52252c] text-red-300 text-xs flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <div>
+                    <p className="font-medium text-red-300">Download Failed</p>
+                    <p className="text-[#d1d5db] text-[11px] mt-0.5">{downloadError}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDownloadError(null)}
+                  className="text-[#9aa0a6] hover:text-white text-xs cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
             )}
 
