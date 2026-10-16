@@ -30,6 +30,10 @@ export async function GET(
   }
 
   if (!targetPath || !fs.existsSync(/*turbopackIgnore: true*/ targetPath)) {
+    const backendUrl = process.env.MEDIAVAULT_BACKEND_URL;
+    if (backendUrl) {
+      return NextResponse.redirect(`${backendUrl.replace(/\/+$/, '')}/api/download/file/${jobId}`);
+    }
     return NextResponse.json({ error: 'Requested media file not found or expired.' }, { status: 404 });
   }
 

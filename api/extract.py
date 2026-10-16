@@ -333,10 +333,15 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        cookie_file = get_cookie_file()
         self._send_json(200, {
             'success': True,
             'service': 'MediaVault Python Extraction Engine',
+            'status': 'healthy',
+            'python_version': sys.version.split()[0],
             'yt_dlp_ready': yt_dlp is not None,
+            'yt_dlp_version': getattr(yt_dlp.version, '__version__', None) if yt_dlp else None,
+            'cookies_configured': cookie_file is not None,
         })
 
     def do_POST(self):
