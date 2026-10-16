@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { DownloadJob } from './types';
-import { getFfmpegPath } from './engine';
+import { getFfmpegPath, findPythonBinary } from './engine';
 import { sanitizeFilename } from './security';
 import { saveDownloadRecord, updateDownloadStatus } from './db';
 
@@ -122,14 +122,23 @@ class JobManager {
     const job = this.jobs.get(jobId);
     if (!job) return;
 
+    const pythonCmd = findPythonBinary();
+    if (!pythonCmd) {
+      job.status = 'failed';
+      job.errorMessage =
+        'Download engine is unavailable: Python was not found in this environment. Video analysis is available via Vercel Python runtime, but local downloading requires Python on the host.';
+      console.error(`[MediaVault Download] Job ${jobId} failed: Python binary not found in environment.`);
+      updateDownloadStatus(jobId, 'failed', { errorMessage: job.errorMessage });
+      this.notify(jobId);
+      return;
+    }
+
     const ffmpeg = getFfmpegPath();
     const outputTemplate = path.join(TEMP_DIR, `${jobId}_${cleanTitle.substring(0, 50)}.%(ext)s`);
 
     const args = [
       '-m',
       'yt_dlp',
-      '--ffmpeg-location',
-      ffmpeg,
       '--js-runtimes',
       'node',
       '--remote-components',
@@ -144,6 +153,10 @@ class JobManager {
       '-o',
       outputTemplate,
     ];
+
+    if (ffmpeg) {
+      args.splice(2, 0, '--ffmpeg-location', ffmpeg);
+    }
 
     if (job.ext === 'mp3') {
       const audioFormat = job.formatId && job.formatId !== 'ba/b'
@@ -164,7 +177,7 @@ class JobManager {
     this.notify(jobId);
     updateDownloadStatus(jobId, 'downloading');
 
-    const child = spawn('python', args, {
+    const child = spawn(pythonCmd, args, {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });

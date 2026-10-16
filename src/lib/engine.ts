@@ -1,16 +1,63 @@
 import { execSync, spawn } from 'child_process';
 import fs from 'fs';
+import path from 'path';
 import { VideoFormatOption, VideoMetadata } from './types';
 
+let cachedPythonCmd: string | null = null;
+let pythonChecked = false;
+
 let cachedFfmpegPath: string | null = null;
+let ffmpegChecked = false;
 
 /**
- * Automatically locates the FFmpeg binary on Windows or Linux.
+ * Dynamically probes for a working Python binary in the environment.
+ * Tests PYTHON_PATH, python3, python, and py without crashing.
  */
-export function getFfmpegPath(): string {
-  if (cachedFfmpegPath && fs.existsSync(/*turbopackIgnore: true*/ cachedFfmpegPath)) {
+export function findPythonBinary(): string | null {
+  if (pythonChecked) {
+    return cachedPythonCmd;
+  }
+  pythonChecked = true;
+
+  const candidates = [
+    process.env.PYTHON_PATH,
+    process.env.PYTHON_BIN,
+    'python3',
+    'python',
+    'py',
+  ].filter(Boolean) as string[];
+
+  for (const cmd of candidates) {
+    try {
+      const out = execSync(`${cmd} --version`, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2500,
+        encoding: 'utf-8',
+      }).trim();
+
+      if (out.toLowerCase().includes('python')) {
+        cachedPythonCmd = cmd;
+        console.log(`[MediaVault Engine] Detected Python executable: ${cmd} (${out})`);
+        return cmd;
+      }
+    } catch {
+      // Continue checking next candidate
+    }
+  }
+
+  console.warn('[MediaVault Engine] No local Python executable found in environment.');
+  cachedPythonCmd = null;
+  return null;
+}
+
+/**
+ * Automatically locates the FFmpeg binary on Windows or Linux without throwing.
+ */
+export function getFfmpegPath(): string | null {
+  if (ffmpegChecked) {
     return cachedFfmpegPath;
   }
+  ffmpegChecked = true;
 
   // 1. Check environment variable
   if (process.env.FFMPEG_PATH && fs.existsSync(/*turbopackIgnore: true*/ process.env.FFMPEG_PATH)) {
@@ -18,35 +65,56 @@ export function getFfmpegPath(): string {
     return cachedFfmpegPath;
   }
 
-  // 2. Discover via imageio-ffmpeg python package
-  try {
-    const pyOutput = execSync(
-      'python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"',
-      { encoding: 'utf-8', timeout: 5000 }
-    ).trim();
+  // 2. Discover via imageio-ffmpeg python package if Python is available
+  const pythonCmd = findPythonBinary();
+  if (pythonCmd) {
+    try {
+      const pyOutput = execSync(
+        `${pythonCmd} -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"`,
+        { encoding: 'utf-8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
 
-    if (pyOutput && fs.existsSync(pyOutput)) {
-      cachedFfmpegPath = pyOutput;
-      return cachedFfmpegPath;
+      if (pyOutput && fs.existsSync(pyOutput)) {
+        cachedFfmpegPath = pyOutput;
+        return cachedFfmpegPath;
+      }
+    } catch {
+      // Continue to next fallback
     }
-  } catch {
-    // Continue to next fallback
   }
 
-  // 3. Fallback to system PATH
+  // 3. Fallback to system PATH using platform-appropriate lookup
   try {
-    const whereOutput = execSync('where.exe ffmpeg', { encoding: 'utf-8', timeout: 3000 }).trim();
-    const firstLine = whereOutput.split('\n')[0].trim();
+    const isWin = process.platform === 'win32';
+    const checkCmd = isWin ? 'where.exe ffmpeg' : 'which ffmpeg';
+    const whereOutput = execSync(checkCmd, { encoding: 'utf-8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const firstLine = whereOutput.split(/\r?\n/)[0].trim();
     if (firstLine && fs.existsSync(firstLine)) {
       cachedFfmpegPath = firstLine;
       return cachedFfmpegPath;
     }
   } catch {
-    // System fallback
+    // Continue to next check
   }
 
-  // Fallback to "ffmpeg" string
-  return 'ffmpeg';
+  // 4. Test if 'ffmpeg' command executes directly
+  try {
+    execSync('ffmpeg -version', { stdio: 'ignore', timeout: 2500 });
+    cachedFfmpegPath = 'ffmpeg';
+    return cachedFfmpegPath;
+  } catch {
+    // FFmpeg is not installed
+  }
+
+  cachedFfmpegPath = null;
+  return null;
+}
+
+/**
+ * Checks if local server downloading and multiplexing is possible.
+ */
+export function isDownloadEngineAvailable(): boolean {
+  return findPythonBinary() !== null;
 }
 
 export function formatBytes(bytes?: number): string {
@@ -109,75 +177,135 @@ interface RawYtDlpOutput {
   formats?: RawYtDlpFormat[];
 }
 
+function parseYtDlpError(stderrData: string): string {
+  if (stderrData.includes('DRM')) {
+    return 'This content is protected by DRM and cannot be downloaded.';
+  }
+  if (stderrData.includes('Private video')) {
+    return 'This video is private and cannot be downloaded.';
+  }
+  if (stderrData.includes('Video unavailable') || stderrData.includes('404')) {
+    return 'The requested video was not found or is unavailable.';
+  }
+  if (stderrData.includes('Sign in') || stderrData.includes('bot')) {
+    return 'Platform requires login or has restricted automated access.';
+  }
+  if (stderrData.trim()) {
+    const lines = stderrData.trim().split(/\r?\n/);
+    const lastLine = lines[lines.length - 1];
+    return lastLine.replace(/^ERROR:\s*/i, '');
+  }
+  return 'Failed to extract video information.';
+}
+
 /**
- * Extracts and maps video metadata and supported formats via yt-dlp.
+ * Extracts and maps video metadata.
+ * Uses local Python engine if available, or delegates to Vercel Python Function (/api/extract).
  */
-export async function extractMetadata(videoUrl: string): Promise<VideoMetadata> {
-  const ffmpeg = getFfmpegPath();
+export async function extractMetadata(
+  videoUrl: string,
+  originUrl?: string
+): Promise<VideoMetadata> {
+  const pythonCmd = findPythonBinary();
 
-  // Arguments for yt-dlp execution
-  const args = [
-    '-m',
-    'yt_dlp',
-    '--dump-json',
-    '--no-playlist',
-    '--no-warnings',
-    '--js-runtimes',
-    'node',
-    '--remote-components',
-    'ejs:github',
-    '--ffmpeg-location',
-    ffmpeg,
-    videoUrl,
-  ];
+  // Mode 1: Local execution via detected Python executable
+  if (pythonCmd) {
+    const extractScript = path.resolve(process.cwd(), 'api', 'extract.py');
+    const ffmpeg = getFfmpegPath();
+    const args: string[] = [];
 
-  return new Promise((resolve, reject) => {
-    const child = spawn('python', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    if (fs.existsSync(extractScript)) {
+      args.push(extractScript, videoUrl);
+    } else {
+      args.push(
+        '-m',
+        'yt_dlp',
+        '--dump-json',
+        '--no-playlist',
+        '--no-warnings',
+        '--js-runtimes',
+        'node',
+        '--remote-components',
+        'ejs:github'
+      );
+      if (ffmpeg) {
+        args.push('--ffmpeg-location', ffmpeg);
+      }
+      args.push(videoUrl);
+    }
 
-    let stdoutData = '';
-    let stderrData = '';
+    return new Promise((resolve, reject) => {
+      const child = spawn(/*turbopackIgnore: true*/ pythonCmd, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
 
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdoutData += chunk.toString('utf-8');
-    });
+      let stdoutData = '';
+      let stderrData = '';
 
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderrData += chunk.toString('utf-8');
-    });
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutData += chunk.toString('utf-8');
+      });
 
-    child.on('close', (code: number) => {
-      if (code !== 0) {
-        let errMessage = 'Failed to extract video information.';
-        if (stderrData.includes('Private video')) {
-          errMessage = 'This video is private and cannot be downloaded.';
-        } else if (stderrData.includes('Video unavailable') || stderrData.includes('404')) {
-          errMessage = 'The requested video was not found or is unavailable.';
-        } else if (stderrData.includes('Sign in') || stderrData.includes('bot')) {
-          errMessage = 'Platform requires login or has restricted automated access.';
-        } else if (stderrData.includes('DRM')) {
-          errMessage = 'This content is protected by DRM and cannot be downloaded.';
-        } else if (stderrData.trim()) {
-          const lines = stderrData.trim().split('\n');
-          errMessage = lines[lines.length - 1].replace(/^ERROR:\s*/i, '');
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderrData += chunk.toString('utf-8');
+      });
+
+      child.on('close', (code: number) => {
+        if (code !== 0) {
+          const errMessage = parseYtDlpError(stderrData);
+          console.error('[MediaVault Engine] Extraction failed:', errMessage);
+          return reject(new Error(errMessage));
         }
-        return reject(new Error(errMessage));
-      }
 
-      try {
-        const raw = JSON.parse(stdoutData.trim()) as RawYtDlpOutput;
-        const metadata = processRawMetadata(raw, videoUrl);
-        resolve(metadata);
-      } catch (err: unknown) {
-        reject(new Error(`Failed to parse media metadata: ${(err as Error).message}`));
-      }
+        try {
+          const parsed = JSON.parse(stdoutData.trim());
+          if (parsed.formats && Array.isArray(parsed.formats)) {
+            // Already structured by api/extract.py
+            return resolve(parsed as VideoMetadata);
+          }
+          // Raw yt-dlp json format
+          const metadata = processRawMetadata(parsed as RawYtDlpOutput, videoUrl);
+          resolve(metadata);
+        } catch (err: unknown) {
+          reject(new Error(`Failed to parse media metadata: ${(err as Error).message}`));
+        }
+      });
+
+      child.on('error', (err: Error) => {
+        console.error('[MediaVault Engine] Process spawn error:', err.message);
+        reject(new Error(`Failed to execute extraction engine: ${err.message}`));
+      });
+    });
+  }
+
+  // Mode 2: Vercel Serverless environment - delegate to /api/extract Python Function
+  const host = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : originUrl || 'http://localhost:3000';
+
+  const endpoint = `${host}/api/extract`;
+  console.log(`[MediaVault Engine] Node Python not found. Delegating extraction to Vercel Python runtime: ${endpoint}`);
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: videoUrl }),
     });
 
-    child.on('error', (err: Error) => {
-      reject(new Error(`Failed to execute extraction engine: ${err.message}`));
-    });
-  });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || `Python extraction function returned status ${res.status}`);
+    }
+
+    return data.data as VideoMetadata;
+  } catch (fetchErr: unknown) {
+    const errMsg = fetchErr instanceof Error ? fetchErr.message : 'Unknown network error';
+    console.error('[MediaVault Engine] Python function delegation failed:', errMsg);
+    throw new Error(
+      `Video extraction engine is unavailable. Neither local Python nor Vercel Python function was reachable (${errMsg}).`
+    );
+  }
 }
 
 function processRawMetadata(raw: RawYtDlpOutput, originalUrl: string): VideoMetadata {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateAndNormalizeUrl } from '@/lib/security';
 import { jobManager } from '@/lib/job-manager';
+import { isDownloadEngineAvailable } from '@/lib/engine';
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,6 +13,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { success: false, error: validation.error || 'Invalid video URL.' },
         { status: 400 }
+      );
+    }
+
+    if (!isDownloadEngineAvailable()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'Direct media downloading and stream multiplexing require a server environment with Python and FFmpeg installed. Video analysis is supported on Vercel, but local downloading requires Python on the host.',
+        },
+        { status: 503 }
       );
     }
 

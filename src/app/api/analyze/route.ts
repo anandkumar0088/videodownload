@@ -15,7 +15,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const metadata = await extractMetadata(validation.url);
+    const originUrl = req.nextUrl.origin;
+    const metadata = await extractMetadata(validation.url, originUrl);
 
     return NextResponse.json({
       success: true,
@@ -23,6 +24,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Failed to analyze video.';
+    console.error('[MediaVault API] Analyze error:', msg);
     return NextResponse.json(
       { success: false, error: msg },
       { status: 422 }

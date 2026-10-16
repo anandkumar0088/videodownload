@@ -1,0 +1,255 @@
+"""
+MediaVault Universal Video Downloader - Python Extraction Engine
+Compatible with Vercel Python Serverless Functions and local execution.
+"""
+from http.server import BaseHTTPRequestHandler
+import json
+import sys
+import re
+import urllib.parse
+
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+
+
+def format_duration(seconds):
+    if not seconds or seconds <= 0:
+        return '0:00'
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    if hrs > 0:
+        return f"{hrs}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
+
+def format_bytes(bytes_count):
+    if not bytes_count or bytes_count <= 0:
+        return 'Unknown size'
+    units = ['B', 'KB', 'MB', 'GB']
+    size = float(bytes_count)
+    unit_idx = 0
+    while size >= 1024 and unit_idx < len(units) - 1:
+        size /= 1024.0
+        unit_idx += 1
+    return f"{size:.1f} {units[unit_idx]}"
+
+
+def extract_video_info(video_url):
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed in the Python environment.")
+
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'extract_flat': False,
+        'no_color': True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            raw = ydl.extract_info(video_url, download=False)
+    except Exception as err:
+        err_str = str(err)
+        if 'DRM' in err_str:
+            raise RuntimeError("This content is protected by DRM and cannot be downloaded.")
+        elif 'Private video' in err_str:
+            raise RuntimeError("This video is private and cannot be downloaded.")
+        elif 'Video unavailable' in err_str or '404' in err_str:
+            raise RuntimeError("The requested video was not found or is unavailable.")
+        elif 'Sign in' in err_str or 'bot' in err_str:
+            raise RuntimeError("Platform requires login or has restricted automated access.")
+        else:
+            clean_err = re.sub(r'^ERROR:\s*', '', err_str.strip())
+            raise RuntimeError(clean_err if clean_err else "Failed to extract video information.")
+
+    if not raw:
+        raise RuntimeError("Failed to retrieve media information from source.")
+
+    duration = raw.get('duration') or 0
+    width = raw.get('width') or 0
+    height = raw.get('height') or 0
+    aspect_ratio = raw.get('aspect_ratio') or (width / height if width and height else 1.78)
+
+    is_vertical = bool(
+        (height and width and height > width) or
+        (aspect_ratio and aspect_ratio < 1) or
+        '/shorts/' in video_url or
+        '/reel/' in video_url or
+        'tiktok.com' in video_url
+    )
+
+    raw_formats = raw.get('formats') or []
+
+    # Quality bucket definitions
+    quality_targets = [
+        {'label': '4K', 'min_h': 2160, 'name': '2160p (4K UHD)'},
+        {'label': '2K', 'min_h': 1440, 'name': '1440p (2K QHD)'},
+        {'label': '1080p', 'min_h': 1080, 'name': '1080p (Full HD)'},
+        {'label': '720p', 'min_h': 720, 'name': '720p (HD)'},
+        {'label': '480p', 'min_h': 480, 'name': '480p (SD)'},
+        {'label': '360p', 'min_h': 360, 'name': '360p (Data Saver)'},
+    ]
+
+    audio_candidates = [
+        f for f in raw_formats
+        if f.get('vcodec') == 'none' and f.get('acodec') != 'none'
+    ]
+    best_audio = sorted(audio_candidates, key=lambda f: f.get('abr') or 0, reverse=True)
+    best_audio_stream = best_audio[0] if best_audio else None
+
+    parsed_options = []
+
+    for target in quality_targets:
+        matching = []
+        for f in raw_formats:
+            if f.get('vcodec') == 'none':
+                continue
+            h = f.get('height') or 0
+            w = f.get('width') or 0
+            eff_h = max(h, w) if is_vertical else h
+            note = (f.get('format_note') or '').lower()
+            res = (f.get('resolution') or '').lower()
+
+            if target['label'] == '4K':
+                if eff_h >= 2160 or w >= 3840 or '2160p' in note or '4k' in note or '3840x' in res:
+                    matching.append(f)
+            elif target['label'] == '2K':
+                if (1440 <= eff_h < 2160) or (2560 <= w < 3840) or '1440p' in note or '2k' in note:
+                    matching.append(f)
+            elif target['label'] == '1080p':
+                if (1080 <= eff_h < 1440) or (1920 <= w < 2560) or '1080p' in note or '1080' in res:
+                    matching.append(f)
+            elif target['label'] == '720p':
+                if (720 <= eff_h < 1080) or (1280 <= w < 1920) or '720p' in note:
+                    matching.append(f)
+            elif target['label'] == '480p':
+                if (480 <= eff_h < 720) or (854 <= w < 1280) or '480p' in note:
+                    matching.append(f)
+            elif target['label'] == '360p':
+                if (360 <= eff_h < 480) or (640 <= w < 854) or '360p' in note:
+                    matching.append(f)
+
+        if matching:
+            best_match = sorted(
+                matching,
+                key=lambda f: (f.get('tbr') or f.get('vbr') or 0),
+                reverse=True
+            )[0]
+
+            video_size = best_match.get('filesize') or best_match.get('filesize_approx') or 0
+            audio_size = (
+                best_audio_stream.get('filesize') or best_audio_stream.get('filesize_approx') or 0
+            ) if (best_audio_stream and best_match.get('acodec') == 'none') else 0
+            total_size = video_size + audio_size
+
+            parsed_options.append({
+                'formatId': best_match.get('format_id') or target['label'],
+                'qualityLabel': target['label'],
+                'resolution': best_match.get('resolution') or f"{best_match.get('width', 0)}x{best_match.get('height', 0)}",
+                'ext': 'mp4',
+                'filesize': total_size if total_size > 0 else None,
+                'filesizeFormatted': format_bytes(total_size) if total_size > 0 else None,
+                'hasAudio': True,
+                'vcodec': best_match.get('vcodec'),
+                'acodec': best_match.get('acodec') or (best_audio_stream.get('acodec') if best_audio_stream else None),
+            })
+
+    # Audio option
+    if best_audio_stream:
+        a_size = best_audio_stream.get('filesize') or best_audio_stream.get('filesize_approx') or 0
+        parsed_options.append({
+            'formatId': best_audio_stream.get('format_id') or 'ba/b',
+            'qualityLabel': 'Audio Only',
+            'resolution': 'Audio Stream (MP3)',
+            'ext': 'mp3',
+            'filesize': a_size if a_size > 0 else None,
+            'filesizeFormatted': format_bytes(a_size) if a_size > 0 else None,
+            'hasAudio': True,
+            'acodec': best_audio_stream.get('acodec'),
+        })
+
+    return {
+        'id': raw.get('id', ''),
+        'title': raw.get('title', 'Untitled Video'),
+        'thumbnail': raw.get('thumbnail'),
+        'duration': duration,
+        'durationFormatted': format_duration(duration),
+        'uploader': raw.get('uploader'),
+        'originalUrl': video_url,
+        'isVertical': is_vertical,
+        'formats': parsed_options,
+    }
+
+
+class handler(BaseHTTPRequestHandler):
+    """
+    Vercel Serverless Function HTTP Handler
+    """
+
+    def _send_json(self, status_code, data):
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_GET(self):
+        self._send_json(200, {
+            'success': True,
+            'service': 'MediaVault Python Extraction Engine',
+            'yt_dlp_ready': yt_dlp is not None,
+        })
+
+    def do_POST(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length <= 0:
+                self._send_json(400, {'success': False, 'error': 'Empty request body.'})
+                return
+
+            body_bytes = self.rfile.read(content_length)
+            payload = json.loads(body_bytes.decode('utf-8'))
+            url = payload.get('url', '').strip()
+
+            if not url:
+                self._send_json(400, {'success': False, 'error': 'A video URL is required.'})
+                return
+
+            metadata = extract_video_info(url)
+            self._send_json(200, {'success': True, 'data': metadata})
+
+        except json.JSONDecodeError:
+            self._send_json(400, {'success': False, 'error': 'Invalid JSON in request.'})
+        except Exception as e:
+            self._send_json(422, {'success': False, 'error': str(e)})
+
+
+if __name__ == '__main__':
+    # CLI mode for local execution from Node.js
+    if len(sys.argv) < 2:
+        sys.stderr.write("Usage: python api/extract.py <video_url>\n")
+        sys.exit(1)
+
+    target_url = sys.argv[1].strip()
+    try:
+        result = extract_video_info(target_url)
+        sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode('utf-8'))
+        sys.exit(0)
+    except Exception as exc:
+        sys.stderr.write(str(exc) + "\n")
+        sys.exit(1)
